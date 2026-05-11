@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
                 let updates = tg.poll_updates(offset).await;
                 for upd in updates {
                     offset = upd.update_id + 1;
-                    handle_update(&tg, &upd, &all_stats, ss.elapsed().as_secs(), configured_chat_id, &gn).await;
+                    handle_update(&tg, &upd, &all_stats, ss.elapsed().as_secs(), configured_chat_id, &gn, &shutdown).await;
                 }
             }
         }))
@@ -251,6 +251,7 @@ async fn handle_update(
     elapsed_secs: u64,
     configured_chat_id: i64,
     gpu_name: &str,
+    shutdown: &Arc<AtomicBool>,
 ) {
     // Extract chat_id and text from message or callback_query
     let (chat_id, text, callback_id) = if let Some(msg) = &upd.message {
@@ -289,6 +290,7 @@ async fn handle_update(
                  /status — status ringkas\n\
                  /accounts — daftar semua akun\n\
                  /stats — stats lengkap\n\
+                 /stop — hentikan miner\n\
                  /help — menu ini"
             );
             tg.send_to(chat_id, &text, Some(main_menu_keyboard())).await;
@@ -304,6 +306,10 @@ async fn handle_update(
         "stats" | "cmd_stats" => {
             let text = format_stats(&entries, elapsed_secs);
             tg.send_to(chat_id, &text, Some(main_menu_keyboard())).await;
+        }
+        "stop" | "cmd_stop" => {
+            tg.send_to(chat_id, "🛑 *Menghentikan semua miner...*\nTunggu beberapa detik.", None).await;
+            shutdown.store(true, Ordering::Relaxed);
         }
         _ => {
             tg.send_to(chat_id, "❓ Perintah tidak dikenal. Ketik /help untuk daftar perintah.", None).await;

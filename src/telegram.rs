@@ -101,6 +101,7 @@ impl TelegramBot {
                 {"command": "status",   "description": "Status ringkas miner"},
                 {"command": "accounts", "description": "Daftar semua akun & hashrate"},
                 {"command": "stats",    "description": "Stats lengkap semua akun"},
+                {"command": "stop",     "description": "Hentikan semua miner (graceful shutdown)"},
                 {"command": "help",     "description": "Bantuan & daftar perintah"},
             ]
         });
