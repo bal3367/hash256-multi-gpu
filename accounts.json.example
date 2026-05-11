@@ -15,7 +15,7 @@
   "gpu_batch_size": 4194304,
   "priority_gwei": 5.0,
   "max_fee_gwei": 100.0,
-  "telegram_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
-  "telegram_chat_id": "YOUR_TELEGRAM_CHAT_ID",
+  "telegram_token": "8674308964:AAHzGNQSOpv2A3noOKsNnKoeh91DdrZNkOg",
+  "telegram_chat_id": "5051864490",
   "stats_interval_secs": 60
 }
