@@ -10,7 +10,10 @@ use eyre::{eyre, Result};
 use serde::Deserialize;
 
 use account::{AccountConfig, AccountStats, MiningConfig};
-use telegram::{StatEntry, TelegramBot};
+use telegram::{
+    format_accounts, format_stats, format_status,
+    main_menu_keyboard, StatEntry, TelegramBot, TgUpdate,
+};
 
 #[derive(Deserialize)]
 struct Config {
@@ -41,7 +44,6 @@ fn default_stats_interval() -> u64 { 60 }
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
 
-    // Determine config file path (--config path or default accounts.json)
     let args: Vec<String> = std::env::args().collect();
     let config_path = args.windows(2)
         .find(|w| w[0] == "--config")
@@ -70,33 +72,32 @@ async fn main() -> Result<()> {
     let telegram_token = cfg.telegram_token
         .or_else(|| std::env::var("TELEGRAM_TOKEN").ok())
         .unwrap_or_default();
-    let telegram_chat_id = cfg.telegram_chat_id
+    let telegram_chat_id_str = cfg.telegram_chat_id
         .or_else(|| std::env::var("TELEGRAM_CHAT_ID").ok())
         .unwrap_or_default();
 
-    let has_telegram = !telegram_token.is_empty() && !telegram_chat_id.is_empty();
-    let telegram = Arc::new(TelegramBot::new(telegram_token, telegram_chat_id));
+    let has_telegram = !telegram_token.is_empty() && !telegram_chat_id_str.is_empty();
+    let configured_chat_id: i64 = telegram_chat_id_str.parse().unwrap_or(0);
+    let telegram = Arc::new(TelegramBot::new(telegram_token, telegram_chat_id_str));
 
-    println!("🔐 HASH Multi-Account GPU Miner v0.2");
+    println!("🔐 HASH Multi-Account GPU Miner v0.3");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("📋 Accounts  : {}", cfg.accounts.len());
     println!("⛽ RPC URL   : {rpc_url}");
 
     // Init GPU
     #[cfg(feature = "gpu")]
-    let gpu = {
+    let (gpu, gpu_name) = {
         match gpu::GpuMiner::new(cfg.gpu_batch_size) {
             Ok(g) => {
-                println!("🎮 GPU        : {}", g.device_name());
+                let name = g.device_name().to_string();
+                println!("🎮 GPU        : {name}");
                 println!("📦 Batch size : {} nonces/dispatch", g.batch_size());
                 match g.self_test() {
                     Ok(()) => println!("✅ GPU self-test passed"),
-                    Err(e) => {
-                        eprintln!("❌ GPU self-test failed: {e}");
-                        eprintln!("   Falling back to CPU mining");
-                    }
+                    Err(e) => eprintln!("⚠️  GPU self-test failed: {e}"),
                 }
-                Arc::new(Mutex::new(g))
+                (Arc::new(Mutex::new(g)), name)
             }
             Err(e) => {
                 eprintln!("⚠️  GPU init failed: {e}");
@@ -105,6 +106,9 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    #[cfg(not(feature = "gpu"))]
+    let gpu_name = "CPU only".to_string();
 
     let batch_size = cfg.gpu_batch_size.unwrap_or(1 << 22);
     let mining_cfg = Arc::new(MiningConfig {
@@ -124,23 +128,20 @@ async fn main() -> Result<()> {
         });
     }
 
+    let session_start = Arc::new(Instant::now());
+
     // Build per-account stats slots
     let all_stats: Vec<Arc<Mutex<AccountStats>>> = cfg.accounts
         .iter()
         .map(|a| Arc::new(Mutex::new(AccountStats::new(a.label.clone()))))
         .collect();
 
-    // Notify Telegram: start
+    // Notify Telegram: start + register bot commands
     if has_telegram {
         let labels: Vec<String> = cfg.accounts.iter().map(|a| a.label.clone()).collect();
-        #[cfg(feature = "gpu")]
-        let gpu_name = {
-            let g = gpu.lock().unwrap();
-            g.device_name().to_string()
-        };
-        #[cfg(not(feature = "gpu"))]
-        let gpu_name = "CPU only".to_string();
+        telegram.set_commands().await;
         telegram.notify_start(&labels, &gpu_name).await;
+        println!("📬 Telegram bot commands registered");
     }
 
     // Spawn per-account tasks
@@ -157,10 +158,7 @@ async fn main() -> Result<()> {
 
         let handle = tokio::spawn(async move {
             account::run_account(
-                acc_cfg,
-                mc,
-                stats,
-                tg,
+                acc_cfg, mc, stats, tg,
                 #[cfg(feature = "gpu")]
                 gpu_ref,
                 sd,
@@ -170,30 +168,23 @@ async fn main() -> Result<()> {
         handles.push(handle);
     }
 
-    // Stats reporter
+    // Periodic stats reporter
     let stats_reporter = {
         let all_stats = all_stats.clone();
         let telegram = Arc::clone(&telegram);
         let shutdown = Arc::clone(&shutdown);
         let interval = cfg.stats_interval_secs;
-        let session_start = Instant::now();
+        let ss = Arc::clone(&session_start);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(interval)).await;
                 if shutdown.load(Ordering::Relaxed) { break; }
 
-                let entries: Vec<StatEntry> = all_stats
-                    .iter()
-                    .map(|s| {
-                        let s = s.lock().unwrap();
-                        StatEntry { label: s.label.clone(), hashrate: s.hashrate, solutions: s.solutions }
-                    })
-                    .collect();
-
-                // Console summary
+                let entries = collect_stats(&all_stats);
                 let total_hr: f64 = entries.iter().map(|e| e.hashrate).sum();
                 let total_sol: u64 = entries.iter().map(|e| e.solutions).sum();
-                println!("\n📊 Stats ({:.0}s elapsed):", session_start.elapsed().as_secs_f64());
+                let elapsed = ss.elapsed().as_secs_f64();
+                println!("\n📊 Stats ({:.0}s elapsed):", elapsed);
                 for e in &entries {
                     println!("   {:20} | {:8.2} MH/s | {} solutions",
                         e.label, e.hashrate / 1_000_000.0, e.solutions);
@@ -201,21 +192,121 @@ async fn main() -> Result<()> {
                 println!("   Total: {:.2} MH/s | {} solutions\n", total_hr / 1_000_000.0, total_sol);
 
                 if has_telegram {
-                    telegram.notify_stats(&entries, session_start.elapsed().as_secs()).await;
+                    telegram.notify_stats(&entries, ss.elapsed().as_secs()).await;
                 }
             }
         })
     };
 
-    // Wait for all account tasks
+    // Telegram command listener (long-polling)
+    let cmd_listener = if has_telegram {
+        let tg = Arc::clone(&telegram);
+        let all_stats = all_stats.clone();
+        let gn = gpu_name.clone();
+        let shutdown = Arc::clone(&shutdown);
+        let ss = Arc::clone(&session_start);
+        Some(tokio::spawn(async move {
+            let mut offset = 0i64;
+            loop {
+                if shutdown.load(Ordering::Relaxed) { break; }
+                let updates = tg.poll_updates(offset).await;
+                for upd in updates {
+                    offset = upd.update_id + 1;
+                    handle_update(&tg, &upd, &all_stats, ss.elapsed().as_secs(), configured_chat_id, &gn).await;
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     for h in handles {
         let _ = h.await;
     }
     stats_reporter.abort();
+    if let Some(t) = cmd_listener { t.abort(); }
 
     if has_telegram {
         telegram.notify_stopped().await;
     }
     println!("✅ All miners stopped.");
     Ok(())
+}
+
+// ── Collect stats snapshot ────────────────────────────────────────────────
+
+fn collect_stats(all_stats: &[Arc<Mutex<AccountStats>>]) -> Vec<StatEntry> {
+    all_stats.iter().map(|s| {
+        let s = s.lock().unwrap();
+        StatEntry { label: s.label.clone(), hashrate: s.hashrate, solutions: s.solutions }
+    }).collect()
+}
+
+// ── Telegram update dispatcher ────────────────────────────────────────────
+
+async fn handle_update(
+    tg: &TelegramBot,
+    upd: &TgUpdate,
+    all_stats: &[Arc<Mutex<AccountStats>>],
+    elapsed_secs: u64,
+    configured_chat_id: i64,
+    gpu_name: &str,
+) {
+    // Extract chat_id and text from message or callback_query
+    let (chat_id, text, callback_id) = if let Some(msg) = &upd.message {
+        (msg.chat.id, msg.text.as_deref().unwrap_or("").to_string(), None)
+    } else if let Some(cb) = &upd.callback_query {
+        let cid = cb.from.id;
+        let data = cb.data.as_deref().unwrap_or("").to_string();
+        (cid, data, Some(cb.id.as_str()))
+    } else {
+        return;
+    };
+
+    // Security: only respond to configured chat
+    if chat_id != configured_chat_id {
+        return;
+    }
+
+    // Answer callback to clear button loading spinner
+    if let Some(cb_id) = callback_id {
+        tg.answer_callback(cb_id).await;
+    }
+
+    let cmd = text.trim().split_whitespace().next().unwrap_or("");
+    let cmd = cmd.trim_start_matches('/');
+    // Strip @BotName suffix (e.g. "/status@MyBot" → "status")
+    let cmd = cmd.split('@').next().unwrap_or(cmd);
+
+    let entries = collect_stats(all_stats);
+
+    match cmd {
+        "start" | "help" => {
+            let text = format!(
+                "🚀 *HASH Multi-Account Miner*\n\
+                 GPU: `{gpu_name}`\n\
+                 Pilih perintah di bawah atau ketik langsung:\n\n\
+                 /status — status ringkas\n\
+                 /accounts — daftar semua akun\n\
+                 /stats — stats lengkap\n\
+                 /help — menu ini"
+            );
+            tg.send_to(chat_id, &text, Some(main_menu_keyboard())).await;
+        }
+        "status" | "cmd_status" => {
+            let text = format_status(&entries, elapsed_secs, gpu_name);
+            tg.send_to(chat_id, &text, Some(main_menu_keyboard())).await;
+        }
+        "accounts" | "cmd_accounts" => {
+            let text = format_accounts(&entries);
+            tg.send_to(chat_id, &text, Some(main_menu_keyboard())).await;
+        }
+        "stats" | "cmd_stats" => {
+            let text = format_stats(&entries, elapsed_secs);
+            tg.send_to(chat_id, &text, Some(main_menu_keyboard())).await;
+        }
+        _ => {
+            tg.send_to(chat_id, "❓ Perintah tidak dikenal. Ketik /help untuk daftar perintah.", None).await;
+        }
+    }
 }
