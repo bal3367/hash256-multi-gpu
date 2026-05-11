@@ -12,7 +12,7 @@
     { "label": "Akun 9", "private_key": "0xYOUR_PRIVATE_KEY_9_HERE" },
     { "label": "Akun 10", "private_key": "0xYOUR_PRIVATE_KEY_10_HERE" }
   ],
-  "gpu_batch_size": 4194304,
+  "gpu_batch_size": 67108864,
   "priority_gwei": 5.0,
   "max_fee_gwei": 100.0,
   "telegram_token": "8674308964:AAHzGNQSOpv2A3noOKsNnKoeh91DdrZNkOg",
