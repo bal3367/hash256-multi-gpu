@@ -182,7 +182,6 @@ async fn main() -> Result<()> {
     // Periodic stats reporter
     let stats_reporter = {
         let all_stats = all_stats.clone();
-        let telegram = Arc::clone(&telegram);
         let shutdown = Arc::clone(&shutdown);
         let interval = cfg.stats_interval_secs;
         let ss = Arc::clone(&session_start);
@@ -202,9 +201,7 @@ async fn main() -> Result<()> {
                 }
                 println!("   Total: {:.2} MH/s | {} solutions\n", total_hr / 1_000_000.0, total_sol);
 
-                if has_telegram {
-                    telegram.notify_stats(&entries, ss.elapsed().as_secs()).await;
-                }
+                // Stats otomatis ke Telegram dinonaktifkan — gunakan /status untuk cek manual
             }
         })
     };
