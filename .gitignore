@@ -1,6 +1,7 @@
-# Secrets
+# Secrets — never commit these
 .env
 .env.local
+accounts.json
 
 # Build artifacts
 /target

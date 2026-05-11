@@ -1,92 +1,195 @@
-# SUDAH ADA VERSI BARU OPTIMALISASI BISA KE https://github.com/mrfunntastiic/hash256-mine
+# HASH Token Multi-Account GPU Miner
 
-# HASH Token CPU Miner (Rust)
+Rust miner untuk HASH token di Ethereum — mendukung **10+ akun secara bersamaan** dengan **GPU acceleration (OpenCL)** dan **monitoring via Telegram bot**.
 
-Port Rust dari `miner.js` di folder induk. Native, multi-threaded, dan jauh lebih cepat dari versi Node.js.
+## Fitur
 
-## Kenapa Rust?
+- Multi-akun: jalankan 10+ wallet sekaligus dari satu file konfigurasi
+- GPU mining via OpenCL (NVIDIA/AMD) — Keccak-256 kernel yang dioptimasi
+- CPU fallback otomatis jika GPU tidak tersedia
+- Telegram bot: notifikasi start, solusi ditemukan, stats berkala, error
+- Retry otomatis untuk kegagalan RPC
+- Verifikasi CPU setelah GPU menemukan solusi (belt-and-braces)
 
-| Hal | Node.js (`miner.js`) | Rust (di sini) |
-|---|---|---|
-| Hashing | single-threaded JS | semua core via `std::thread::scope` |
-| Per-attempt cost | `await contract.currentEpoch()` per nonce (RPC roundtrip!) | murni CPU, RPC-nya cuma di-poll tiap 15 detik |
-| Hash rate (laptop 8-core) | ~1k–5k H/s | ~ratusan ribu – jutaan H/s |
-| Binary | butuh Node + 200 MB `node_modules` | satu binary statis |
+---
 
-## Requirements
+## Persyaratan
 
-- Rust toolchain (>= 1.75) — install via [rustup.rs](https://rustup.rs)
-- Wallet Ethereum dengan ETH untuk gas
-- RPC endpoint (default `https://eth.llamarpc.com` — publik, ganti ke Alchemy/Infura punyamu kalau bisa)
+| Kebutuhan | Keterangan |
+|-----------|-----------|
+| Rust ≥ 1.75 | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| OpenCL runtime | Ubuntu: `sudo apt install ocl-icd-opencl-dev` |
+| Driver GPU NVIDIA | `sudo apt install nvidia-opencl-dev` |
+| ETH di setiap wallet | Untuk gas fee — rekomendasi 0.05 ETH/akun |
+| RPC endpoint | Gunakan Alchemy/Infura untuk performa lebih stabil |
 
-## Build
+---
 
-```powershell
-cd hash256-cli
-cargo build --release
-```
+## Instalasi & Setup
 
-Binary keluar di `target/release/hash-miner-rs.exe`.
+### 1. Clone dan masuk ke direktori
 
-## Run
-
-### Cara 1: env var (paling aman)
-
-PowerShell:
-```powershell
-$env:PRIVATE_KEY = "0xabc..."
-$env:RPC_URL = "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"  # optional
-$env:MINER_THREADS = "8"                                        # optional, default = num CPUs
-cargo run --release
-```
-
-Bash:
 ```bash
-PRIVATE_KEY=0xabc... cargo run --release
+git clone https://github.com/bal3367/hash256-multi-gpu.git
+cd hash256-multi-gpu
 ```
 
-### Cara 2: prompt interaktif
+### 2. Buat file konfigurasi
 
-```powershell
-cargo run --release
-# masukin private key pas diminta (input disembunyiin via rpassword)
+```bash
+cp accounts.json.example accounts.json
+nano accounts.json
 ```
 
-## Konfigurasi
+Isi `accounts.json` dengan private key dan konfigurasi:
 
-Ada di konstanta atas `src/main.rs`:
+```json
+{
+  "rpc_url": "https://eth.llamarpc.com",
+  "accounts": [
+    { "label": "Akun 1", "private_key": "0x..." },
+    { "label": "Akun 2", "private_key": "0x..." }
+  ],
+  "gpu_batch_size": 4194304,
+  "priority_gwei": 5.0,
+  "max_fee_gwei": 100.0,
+  "telegram_token": "TOKEN_DARI_BOTFATHER",
+  "telegram_chat_id": "CHAT_ID_KAMU",
+  "stats_interval_secs": 60
+}
+```
 
-- `HASH_CONTRACT_ADDRESS` — `0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc`
-- `DEFAULT_RPC_URL` — di-override pakai env `RPC_URL`
-- `CHAIN_ID` — 1 (Ethereum Mainnet)
-- `EPOCH_POLL_INTERVAL` — 15 detik (seberapa sering cek epoch berubah)
-- `STATS_INTERVAL` — 2 detik (refresh hash rate display)
+> **Keamanan:** `accounts.json` sudah ada di `.gitignore`. Jangan pernah commit file ini.
 
-Gas tidak di-hardcode — alloy auto-estimate. Kalau mau force gas, edit bagian `contract.mint(...)` di `main.rs`.
+### 3. Setup Telegram Bot (opsional tapi disarankan)
 
-## Cara kerja mining
+1. Chat `@BotFather` di Telegram → `/newbot` → ikuti instruksi → salin token
+2. Kirim pesan ke bot kamu, lalu buka:
+   `https://api.telegram.org/botTOKEN_KAMU/getUpdates`
+3. Salin `chat.id` dari respons JSON ke field `telegram_chat_id`
 
-Sama persis dengan versi JS:
+### 4. Install OpenCL (Ubuntu/Debian)
 
-1. **Challenge** = `keccak256(abi.encodePacked(chainId, contract, miner, epoch))`
-2. **Proof** = `keccak256(abi.encodePacked(challenge, nonce)) < currentDifficulty`
-3. **Reward** = `100 HASH >> (totalMints / 100_000)`
+```bash
+sudo apt update
+sudo apt install ocl-icd-opencl-dev nvidia-opencl-dev -y
 
-Bedanya di Rust:
-- Tiap worker thread mulai dari `start_nonce + tid` dan inkremen pakai `stride = num_threads` — gak ada nonce yang dihash dua kali antar thread.
-- `start_nonce` di-random tiap ronde supaya beberapa miner di wallet yang sama gak buang energi pada nonce yang sama.
-- Watchdog `tokio` task ngecek epoch tiap 15 detik. Begitu epoch ganti, semua worker di-signal stop via `AtomicBool` dan ronde direstart.
+# Verifikasi GPU terdeteksi:
+clinfo | head -20
+```
 
-## Stop
+### 5. Build
 
-`Ctrl+C` — bakal signal worker buat berhenti setelah attempt sekarang, terus print statistik akhir.
+```bash
+# Dengan GPU support (direkomendasikan)
+cargo build --release
 
-## Security
+# Tanpa GPU (CPU only)
+cargo build --release --no-default-features
+```
 
-- Jangan commit private key. Pakai env var atau prompt.
-- RPC publik bisa rate-limit / di-MITM. Pakai punyamu kalau bisa.
-- Mining butuh ETH untuk gas. Kalau hash rate ketemu solusi tapi gas-mu kurang, tx revert.
+Binary hasil build ada di `target/release/hash-miner-rs`
+
+### 6. Jalankan
+
+```bash
+# Gunakan accounts.json di direktori yang sama
+./target/release/hash-miner-rs
+
+# Atau tentukan path config sendiri
+./target/release/hash-miner-rs --config /path/to/accounts.json
+
+# Jalankan di background dengan screen/tmux
+screen -S miner
+./target/release/hash-miner-rs
+# Ctrl+A, D untuk detach
+```
+
+---
+
+## Konfigurasi Detail
+
+| Field | Default | Keterangan |
+|-------|---------|-----------|
+| `rpc_url` | `https://eth.llamarpc.com` | RPC endpoint Ethereum |
+| `accounts` | — | List akun (label + private key) |
+| `gpu_batch_size` | `4194304` (4M) | Nonces per GPU dispatch |
+| `priority_gwei` | `5.0` | EIP-1559 priority fee (tip untuk miner) |
+| `max_fee_gwei` | `100.0` | Batas maksimum gas fee |
+| `telegram_token` | — | Token bot dari @BotFather |
+| `telegram_chat_id` | — | Chat ID tujuan notifikasi |
+| `stats_interval_secs` | `60` | Interval laporan stats ke Telegram |
+
+### Tips GPU Batch Size
+
+| GPU | Batch size yang disarankan |
+|-----|--------------------------|
+| RTX 3060 / 4060 | `4194304` (4M) |
+| RTX 3080 / 4080 | `16777216` (16M) |
+| RTX 4090 / PRO 6000 WS | `67108864` (64M) |
+
+---
+
+## Monitoring Telegram
+
+Bot akan mengirim notifikasi:
+
+```
+🚀 HASH Miner Started
+GPU: NVIDIA RTX PRO 6000 WS
+Accounts: 10
+  1. Akun 1
+  2. Akun 2
+  ...
+
+📊 Stats Update (1m 0s)
+  Akun 1: 45.2 MH/s | 2 ✅
+  Akun 2: 44.8 MH/s | 1 ✅
+Total: 452.0 MH/s | 23 solutions
+
+✅ Solution Found!
+Account: Akun 3
+Nonce: 12345678
+TX: 0xabcdef...
+Block: 12345678
+🔗 https://etherscan.io/tx/0xabcdef...
+```
+
+---
+
+## Troubleshooting
+
+**`no OpenCL device found`**
+```bash
+sudo apt install ocl-icd-opencl-dev nvidia-opencl-dev
+clinfo | head -20
+```
+
+**`Genesis not complete`**
+Mining belum dibuka di kontrak. Cek status di https://hash256.org/mine
+
+**`Transaction reverted`**
+- Pastikan ada cukup ETH untuk gas di setiap wallet
+- Difficulty mungkin berubah antar epoch; miner akan otomatis restart round
+
+**GPU utilization rendah**
+Naikkan `gpu_batch_size` sampai `nvidia-smi` menunjukkan >80% utilization.
+
+---
+
+## Keamanan
+
+- `accounts.json` ada di `.gitignore` — JANGAN di-commit
+- Private key hanya dibaca dari file lokal, tidak pernah dikirim ke mana pun
+- Disarankan pakai RPC endpoint pribadi (Alchemy/Infura) bukan public endpoint
+
+---
+
+## Kontrak
+
+- Address: `0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc` (Ethereum Mainnet)
+- Algoritma: `keccak256(abi.encode(bytes32 challenge, uint256 nonce)) < difficulty`
 
 ## License
 
-MIT — risiko ditanggung sendiri.
+MIT

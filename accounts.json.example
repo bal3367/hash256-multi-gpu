@@ -1,0 +1,21 @@
+{
+  "rpc_url": "https://eth.llamarpc.com",
+  "accounts": [
+    { "label": "Akun 1", "private_key": "0xYOUR_PRIVATE_KEY_1_HERE" },
+    { "label": "Akun 2", "private_key": "0xYOUR_PRIVATE_KEY_2_HERE" },
+    { "label": "Akun 3", "private_key": "0xYOUR_PRIVATE_KEY_3_HERE" },
+    { "label": "Akun 4", "private_key": "0xYOUR_PRIVATE_KEY_4_HERE" },
+    { "label": "Akun 5", "private_key": "0xYOUR_PRIVATE_KEY_5_HERE" },
+    { "label": "Akun 6", "private_key": "0xYOUR_PRIVATE_KEY_6_HERE" },
+    { "label": "Akun 7", "private_key": "0xYOUR_PRIVATE_KEY_7_HERE" },
+    { "label": "Akun 8", "private_key": "0xYOUR_PRIVATE_KEY_8_HERE" },
+    { "label": "Akun 9", "private_key": "0xYOUR_PRIVATE_KEY_9_HERE" },
+    { "label": "Akun 10", "private_key": "0xYOUR_PRIVATE_KEY_10_HERE" }
+  ],
+  "gpu_batch_size": 4194304,
+  "priority_gwei": 5.0,
+  "max_fee_gwei": 100.0,
+  "telegram_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
+  "telegram_chat_id": "YOUR_TELEGRAM_CHAT_ID",
+  "stats_interval_secs": 60
+}

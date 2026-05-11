@@ -127,6 +127,63 @@ impl GpuMiner {
         Ok(())
     }
 
+    /// Run a single dispatch of `batch_size` nonces. Returns `Some(nonce)` on
+    /// a hit, `None` otherwise. Callers loop over this to share GPU time between
+    /// multiple accounts (each call releases the lock between iterations).
+    pub fn mine_batch(
+        &self,
+        challenge: B256,
+        difficulty: U256,
+        nonce_base: u64,
+    ) -> Result<Option<u64>> {
+        let cw = split_challenge_le(&challenge);
+        let dw = split_difficulty_be(difficulty);
+
+        let found_nonce = Buffer::<u64>::builder()
+            .queue(self.queue.clone())
+            .flags(flags::MEM_READ_WRITE)
+            .len(1)
+            .copy_host_slice(&[0u64])
+            .build()?;
+        let found_flag = Buffer::<i32>::builder()
+            .queue(self.queue.clone())
+            .flags(flags::MEM_READ_WRITE)
+            .len(1)
+            .copy_host_slice(&[0i32])
+            .build()?;
+
+        found_flag.write(&[0i32][..]).enq()?;
+        found_nonce.write(&[0u64][..]).enq()?;
+
+        let kernel = Kernel::builder()
+            .program(&self.program)
+            .name("mine_keccak")
+            .queue(self.queue.clone())
+            .global_work_size(self.batch_size)
+            .arg(cw[0]).arg(cw[1]).arg(cw[2]).arg(cw[3])
+            .arg(dw[0]).arg(dw[1]).arg(dw[2]).arg(dw[3])
+            .arg(nonce_base)
+            .arg(&found_nonce)
+            .arg(&found_flag)
+            .build()?;
+
+        unsafe { kernel.enq()?; }
+        self.queue.finish()?;
+
+        let mut flag = [0i32];
+        found_flag.read(&mut flag[..]).enq()?;
+        if flag[0] != 0 {
+            let mut got = [0u64];
+            found_nonce.read(&mut got[..]).enq()?;
+            let nonce = got[0];
+            let h = cpu_hash(&challenge, U256::from(nonce));
+            if U256::from_be_bytes::<32>(h.0) < difficulty {
+                return Ok(Some(nonce));
+            }
+        }
+        Ok(None)
+    }
+
     /// Run batches until either a solution is found or `stop_flag` is set or
     /// `attempts_budget` nonces have been hashed. Returns the winning nonce
     /// when one is found.
