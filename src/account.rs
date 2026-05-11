@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -84,10 +83,10 @@ pub struct MiningConfig {
     pub gpu_batch_size: usize,
 }
 
-async fn retry<T, E, F, Fut>(retries: u32, mut f: F) -> Result<T>
+async fn retry<T, E, F, IT>(retries: u32, mut f: F) -> Result<T>
 where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = std::result::Result<T, E>>,
+    F: FnMut() -> IT,
+    IT: std::future::IntoFuture<Output = std::result::Result<T, E>>,
     E: std::fmt::Display,
 {
     let mut last_err = eyre!("no attempts");
@@ -147,7 +146,7 @@ pub async fn run_account(
     let contract = HashToken::new(HASH_CONTRACT_ADDRESS, provider.clone());
 
     // Check genesis
-    match retry(3, || contract.genesisComplete().call()).await {
+    match retry(3, || async { contract.genesisComplete().call().await }).await {
         Ok(g) if !g._0 => {
             eprintln!("❌ [{label}] Genesis not complete");
             telegram.notify_error(&label, "Genesis not complete — mining closed").await;
@@ -175,7 +174,7 @@ pub async fn run_account(
         };
         let epoch = block_num / EPOCH_BLOCKS;
 
-        let challenge = match retry(3, || contract.getChallenge(miner_address).call()).await {
+        let challenge = match retry(3, || async { contract.getChallenge(miner_address).call().await }).await {
             Ok(v) => v._0,
             Err(e) => {
                 eprintln!("❌ [{label}] getChallenge: {e}");
@@ -184,7 +183,7 @@ pub async fn run_account(
             }
         };
 
-        let difficulty = match retry(3, || contract.currentDifficulty().call()).await {
+        let difficulty = match retry(3, || async { contract.currentDifficulty().call().await }).await {
             Ok(v) => v._0,
             Err(e) => {
                 eprintln!("❌ [{label}] difficulty: {e}");
