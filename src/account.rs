@@ -10,7 +10,7 @@ use alloy::sol;
 use eyre::{eyre, Result};
 use rand::Rng;
 
-const LOW_BALANCE_WEI: u128 = 10_000_000_000_000_000; // 0.01 ETH
+const LOW_BALANCE_WEI: u128 = 1_000_000_000_000_000; // 0.001 ETH
 
 fn log_pending_tx(label: &str, tx_hash: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
