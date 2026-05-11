@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,17 @@ use alloy::sol;
 use eyre::{eyre, Result};
 use rand::Rng;
 
-use crate::telegram::{StatEntry, TelegramBot};
+const LOW_BALANCE_WEI: u128 = 10_000_000_000_000_000; // 0.01 ETH
+
+fn log_pending_tx(label: &str, tx_hash: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true).create(true).open("pending_txs.log")
+    {
+        let _ = writeln!(f, "[{label}] {tx_hash}");
+    }
+}
+
+use crate::telegram::TelegramBot;
 
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuMiner;
@@ -182,6 +193,19 @@ pub async fn run_account(
             }
         };
 
+        // Balance check — warn via Telegram if below 0.01 ETH
+        match provider.get_balance(miner_address).await {
+            Ok(bal) => {
+                let bal_u128: u128 = bal.try_into().unwrap_or(u128::MAX);
+                if bal_u128 < LOW_BALANCE_WEI {
+                    let msg = format!("Saldo rendah: {:.5} ETH — top up segera!", bal_u128 as f64 / 1e18);
+                    eprintln!("⚠️ [{label}] {msg}");
+                    telegram.notify_error(&label, &msg).await;
+                }
+            }
+            Err(e) => eprintln!("⚠️ [{label}] balance check: {e}"),
+        }
+
         println!("⛏️  [{label}] epoch={epoch}");
 
         let mut nonce_cursor: u64 = rand::thread_rng().gen();
@@ -268,15 +292,33 @@ pub async fn run_account(
 
         println!("🎉 [{label}] Found nonce={nonce}");
 
-        let priority_wei = (mining_cfg.priority_gwei * 1e9) as u128;
-        let max_fee_wei  = (mining_cfg.max_fee_gwei  * 1e9) as u128;
+        // Dynamic gas estimation — query current network gas price, cap at config max
+        let config_priority = (mining_cfg.priority_gwei * 1e9) as u128;
+        let config_max      = (mining_cfg.max_fee_gwei  * 1e9) as u128;
+        let (priority_wei, max_fee_wei) = match provider.get_gas_price().await {
+            Ok(current_price) => {
+                // max_fee = current_price * 2 gives 1-2 block headroom for base fee changes
+                let max_fee = (current_price * 2 + config_priority)
+                    .min(config_max)
+                    .max(config_priority + 1_000_000_000); // always at least priority + 1 gwei
+                println!("⛽ [{label}] gas price={:.1} gwei → maxFee={:.1} gwei",
+                    current_price as f64 / 1e9, max_fee as f64 / 1e9);
+                (config_priority, max_fee)
+            }
+            Err(_) => {
+                eprintln!("⚠️ [{label}] gas price fetch failed, using config defaults");
+                (config_priority, config_max)
+            }
+        };
 
-        let tx = contract
+        // ── Submit TX ────────────────────────────────────────────────────────
+        match contract
             .mine(U256::from(nonce))
             .max_priority_fee_per_gas(priority_wei)
-            .max_fee_per_gas(max_fee_wei);
-
-        match tx.send().await {
+            .max_fee_per_gas(max_fee_wei)
+            .send()
+            .await
+        {
             Ok(pending) => {
                 let tx_hash = *pending.tx_hash();
                 println!("📋 [{label}] TX: {tx_hash}");
@@ -288,18 +330,57 @@ pub async fn run_account(
                         telegram.notify_solution(&label, &nonce.to_string(), &tx_hash.to_string(), block).await;
                     }
                     Ok(_) => {
-                        eprintln!("❌ [{label}] TX reverted");
-                        telegram.notify_error(&label, "Transaction reverted").await;
+                        // Revert — retry once with gas bumped 50%
+                        eprintln!("❌ [{label}] TX reverted — retry +50% gas");
+                        let retry_priority = priority_wei * 3 / 2;
+                        let retry_max = (max_fee_wei * 3 / 2).min(config_max * 2);
+                        match contract
+                            .mine(U256::from(nonce))
+                            .max_priority_fee_per_gas(retry_priority)
+                            .max_fee_per_gas(retry_max)
+                            .send()
+                            .await
+                        {
+                            Ok(retry_pending) => {
+                                let retry_hash = *retry_pending.tx_hash();
+                                println!("📋 [{label}] Retry TX: {retry_hash}");
+                                match retry_pending.with_required_confirmations(1).get_receipt().await {
+                                    Ok(r) if r.status() => {
+                                        let block = r.block_number.unwrap_or_default();
+                                        println!("✅ [{label}] Retry confirmed block {block}");
+                                        stats_slot.lock().unwrap().solutions += 1;
+                                        telegram.notify_solution(&label, &nonce.to_string(), &retry_hash.to_string(), block).await;
+                                    }
+                                    Ok(_) => {
+                                        eprintln!("❌ [{label}] Retry also reverted");
+                                        telegram.notify_error(&label, "TX reverted 2x — epoch mungkin sudah berubah").await;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ [{label}] Retry receipt: {e}");
+                                        log_pending_tx(&label, &retry_hash.to_string());
+                                        telegram.notify_error(&label, &format!("Retry receipt timeout. TX: {retry_hash}")).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ [{label}] Retry send: {e}");
+                                telegram.notify_error(&label, &format!("Retry TX send: {e}")).await;
+                            }
+                        }
                     }
                     Err(e) => {
-                        eprintln!("❌ [{label}] receipt: {e}");
-                        telegram.notify_error(&label, &format!("Receipt: {e}")).await;
+                        // Receipt timeout — save TX hash for manual recovery
+                        eprintln!("❌ [{label}] Receipt timeout: {e}");
+                        log_pending_tx(&label, &tx_hash.to_string());
+                        telegram.notify_error(&label, &format!(
+                            "Receipt timeout. TX disimpan di pending_txs.log\nTX: {tx_hash}"
+                        )).await;
                     }
                 }
             }
             Err(e) => {
-                eprintln!("❌ [{label}] send: {e}");
-                telegram.notify_error(&label, &format!("TX send: {e}")).await;
+                eprintln!("❌ [{label}] TX send: {e}");
+                telegram.notify_error(&label, &format!("TX send gagal: {e}")).await;
             }
         }
     }
