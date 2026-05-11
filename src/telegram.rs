@@ -7,7 +7,8 @@ use serde_json::Value;
 
 #[derive(Deserialize)]
 struct TgResponse<T> {
-    result: Vec<T>,
+    ok: bool,
+    result: Option<Vec<T>>,
 }
 
 #[derive(Deserialize)]
@@ -124,10 +125,23 @@ impl TelegramBot {
             .send()
             .await
         {
-            Ok(resp) => resp.json::<TgResponse<TgUpdate>>().await
-                .map(|r| r.result)
-                .unwrap_or_default(),
-            Err(_) => vec![],
+            Ok(resp) => match resp.json::<TgResponse<TgUpdate>>().await {
+                Ok(r) => {
+                    if !r.ok {
+                        eprintln!("[Telegram] getUpdates ok=false — kemungkinan ada instance lain yang berjalan (409 Conflict)");
+                    }
+                    r.result.unwrap_or_default()
+                }
+                Err(e) => {
+                    eprintln!("[Telegram] poll_updates parse error: {e}");
+                    vec![]
+                }
+            },
+            Err(e) => {
+                eprintln!("[Telegram] poll_updates network error: {e}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                vec![]
+            }
         }
     }
 

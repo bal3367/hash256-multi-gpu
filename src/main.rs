@@ -77,7 +77,18 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
 
     let has_telegram = !telegram_token.is_empty() && !telegram_chat_id_str.is_empty();
-    let configured_chat_id: i64 = telegram_chat_id_str.parse().unwrap_or(0);
+    let configured_chat_id: i64 = if has_telegram {
+        match telegram_chat_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                eprintln!("❌ telegram_chat_id bukan angka valid: '{telegram_chat_id_str}'");
+                eprintln!("   Contoh benar: \"telegram_chat_id\": \"5051864490\"");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        0
+    };
     let telegram = Arc::new(TelegramBot::new(telegram_token, telegram_chat_id_str));
 
     println!("🔐 HASH Multi-Account GPU Miner v0.3");
